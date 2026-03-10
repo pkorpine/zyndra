@@ -1,0 +1,8 @@
+downloads
+sstate-cache
+*.xsa
+build/cache
+build/tmp
+*.log
+.bash_history
+bitbake.lock

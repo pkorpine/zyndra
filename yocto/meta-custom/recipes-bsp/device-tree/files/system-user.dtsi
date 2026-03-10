@@ -1,0 +1,98 @@
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+    chosen {
+        bootargs = "earlycon clk_ignore_unused";
+    };
+
+    ref_clk: ref_clk {
+        compatible = "fixed-clock";
+        #clock-cells = <0>;
+        clock-frequency = <40000000>;
+    };
+
+    reserved-memory {
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        rx_buffer: rx_buffer@1f000000 {
+            reg = <0x1f000000 0x01000000>; /* 16 MB at top of 512 MB DDR */
+            no-map;
+        };
+    };
+};
+
+&gem0 {
+    status = "okay";
+    phy-mode = "rgmii-id";
+    phy-handle = <&phy0>;
+
+    phy0: phy@0 {
+        reg = <0>;
+        compatible = "ethernet-phy-ieee802.3-c22";
+    };
+};
+
+/* Drive AD9363 ENABLE high at boot via GPIO hog.
+   The AD9361 driver version in use does not claim enable-gpios/txnrx-gpios
+   from DT, so the GPIO controller itself drives ENABLE (EMIO[1]=offset 55)
+   high unconditionally. Without this the chip stays in sleep/alert state
+   and outputs no LVDS data. */
+&gpio0 {
+    ad9363-enable-hog {
+        gpio-hog;
+        gpios = <55 GPIO_ACTIVE_HIGH>;
+        output-high;
+        line-name = "ad9363-enable";
+    };
+};
+
+&spi0 {
+    status = "okay";
+
+    ad9361_phy: ad9361-phy@0 {
+        compatible = "adi,ad9363a";
+        reg = <0>;
+        spi-max-frequency = <10000000>;
+        spi-cpha;
+
+        #address-cells = <1>;
+        #size-cells = <0>;
+        #clock-cells = <1>;
+        clock-output-names = "rx_sampl_clk", "tx_sampl_clk";
+
+        clocks = <&ref_clk>;
+        clock-names = "ad9361_ext_refclk";
+
+        reset-gpios = <&gpio0 54 GPIO_ACTIVE_HIGH>;
+
+        adi,rx-path-clock-frequencies = <983040000 245760000 122880000 61440000 30720000 30720000>;
+        adi,tx-path-clock-frequencies = <983040000 122880000 122880000 61440000 30720000 30720000>;
+
+        /* Use the external 40 MHz reference, no internal XO */
+        adi,xo-disable-use-ext-refclk-enable;
+
+        adi,frequency-division-duplex-mode-enable;
+
+        adi,lvds-mode-enable;
+        adi,lvds-bias-mV = <150>;
+        adi,lvds-rx-onchip-termination-enable;
+
+        adi,rx-frame-pulse-mode-enable;
+
+        // Correct IQ order on AD9361 output
+        adi,pp-rx-swap-enable;
+        adi,pp-tx-swap-enable;
+
+        // LVDS bus delays
+        adi,rx-data-delay = <0>;
+        adi,tx-fb-clock-delay = <0>;
+
+        // Skip digital interface tuning - ADI AXI IP not used
+        adi,digital-interface-tune-skip-mode = <2>;
+
+        // Debug: clock output
+        adi,clk-output-mode-select = <1>; // XTALN (or DCXO) (buffered)
+    };
+};

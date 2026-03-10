@@ -1,0 +1,106 @@
+file_list:
+  - rtl/*.vhd
+
+rule:
+  global:
+    indent_size: 4
+
+  library_008:
+    disable: true
+  context_ref_001:
+    disable: true
+
+  length_001:
+    length: 180
+
+  generic_map_002:
+    # generic name case
+    disable: true
+
+  port_map_002:
+    # port name case
+    disable: true
+
+  process_029:
+    # Use rising/falling_edge
+    disable: false
+    clock: edge
+  if_002:
+    # Do not force parenthesis in boolean expressions
+    disable: true
+  process_026:
+    # No blank line after process is
+    style: no_blank_line
+  process_027:
+    # No blank line before begin
+    style: no_blank_line
+  process_023:
+    # No blank line before end process
+    style: no_blank_line
+  process_022:
+    # No blank line after process begin
+    style: no_blank_line
+  process_035:
+    # Do not align all comments inside a process
+    blank_line_ends_group: "yes"
+
+  if_031:
+    # Do not control blank line before if
+    disable: true
+  if_030:
+    # Do not control blank line after if
+    disable: true
+
+  case_007:
+    # Do not control blank line before case is
+    disable: true
+  case_009:
+    # Do not control blank line before end case
+    disable: true
+
+  process_016:
+    disable: true
+  process_018:
+    disable: true
+
+  procedure_200:
+    style: no_blank_line
+  # procedure_201-205 and function_201-204, function_007 are now subprogram_body rules
+  subprogram_body_201:
+    style: no_blank_line
+  subprogram_body_202:
+    style: no_blank_line
+  subprogram_body_203:
+    style: no_blank_line
+  subprogram_body_204:
+    style: no_blank_line
+  subprogram_body_205:
+    disable: true
+
+  case_010:
+    disable: true
+
+  type_010:
+    disable: true
+  type_011:
+    disable: true
+  type_500:
+    # Enumeration literals uppercase
+    case: upper
+
+  instantiation_036:
+    # Do not need to specify the architecture on instantiation
+    disable: true
+  instantiation_600:
+    disable: false
+    suffixes: ['_inst']
+
+  variable_007:
+    # Allow default values for variables
+    disable: true
+  signal_007:
+    # Allow default values for signals
+    disable: true
+  instantiation_034:
+    # Component instantiation
+    disable: true

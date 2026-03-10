@@ -1,0 +1,14 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+
+  - repo: local
+    hooks:
+      - id: vsg
+        name: VHDL Style Guide
+        language: system
+        entry: uv run --directory fpga vsg -c vsg_config.yaml --fix
+        files: fpga/rtl/.*\.vhdl?$
+        pass_filenames: false

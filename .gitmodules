@@ -1,0 +1,16 @@
+[submodule "yocto/poky"]
+	path = yocto/poky
+	url = git://git.yoctoproject.org/poky.git
+	branch = scarthgap
+[submodule "yocto/meta-arm"]
+	path = yocto/meta-arm
+	url = git://git.yoctoproject.org/meta-arm
+	branch = scarthgap
+[submodule "yocto/meta-xilinx"]
+	path = yocto/meta-xilinx
+	url = https://github.com/Xilinx/meta-xilinx.git
+	branch = rel-v2024.2
+[submodule "yocto/meta-xilinx-tools"]
+	path = yocto/meta-xilinx-tools
+	url = https://github.com/Xilinx/meta-xilinx-tools
+	branch = rel-v2024.2
