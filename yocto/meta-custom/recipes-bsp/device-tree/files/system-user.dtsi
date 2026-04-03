@@ -16,10 +16,22 @@
         #size-cells = <1>;
         ranges;
 
-        rx_buffer: rx_buffer@1f000000 {
-            reg = <0x1f000000 0x01000000>; /* 16 MB at top of 512 MB DDR */
-            no-map;
+        rx_buffer: rx_buffer@20000000 {
+            reg = <0x10000000 0x08000000>; /* 128 MB at 256MB */
         };
+
+        tx_buffer: tx_buffer@28000000 {
+            reg = <0x18000000 0x08000000>; /* 128 MB at 384MB */
+        };
+
+    };
+};
+
+&amba {
+    ad936x_axi: ad936x-axi@43c00000 {
+        compatible = "custom,ad936x-axi";
+        reg = <0x43C00000 0x10000>;
+        memory-region = <&tx_buffer &rx_buffer>;
     };
 };
 
@@ -86,13 +98,29 @@
         adi,pp-tx-swap-enable;
 
         // LVDS bus delays
-        adi,rx-data-delay = <0>;
-        adi,tx-fb-clock-delay = <0>;
+        adi,rx-data-clock-delay = <0xc>;
+        adi,rx-data-delay = <0x0>;
+        adi,tx-fb-clock-delay = <0x0>;
+        adi,tx-data-delay = <0x8>;
 
         // Skip digital interface tuning - ADI AXI IP not used
         adi,digital-interface-tune-skip-mode = <2>;
 
         // Debug: clock output
         adi,clk-output-mode-select = <1>; // XTALN (or DCXO) (buffered)
+
+        /* RF bandwidth */
+        adi,rf-rx-bandwidth-hz = <2000000>;
+        adi,rf-tx-bandwidth-hz = <2000000>;
+
+        /* LO frequencies */
+        adi,rx-synthesizer-frequency-hz = /bits/ 64 <433920000>;
+        adi,tx-synthesizer-frequency-hz = /bits/ 64 <433920000>;
+
+        /* Gain control — manual mode */
+        adi,gc-rx1-mode = <0>;
+
+        /* TX attenuation: 20 dB (value in millidB) */
+        adi,tx-attenuation-mdB = <20000>;
     };
 };

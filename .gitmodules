@@ -14,3 +14,6 @@
 	path = yocto/meta-xilinx-tools
 	url = https://github.com/Xilinx/meta-xilinx-tools
 	branch = rel-v2024.2
+[submodule "fpga/sim/xpm_vhdl"]
+	path = fpga/sim/xpm_vhdl
+	url = https://github.com/fransschreuder/xpm_vhdl.git

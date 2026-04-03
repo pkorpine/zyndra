@@ -34,9 +34,12 @@ set_property -name "use_inline_hdl_ip" -value "1" -objects $obj
 #
 set obj [get_filesets sources_1]
 set files [list \
+    "$rootdir/rtl/ad936x_axi_pkg.vhd"\
     "$rootdir/rtl/axi_master_wr.vhd"\
+    "$rootdir/rtl/axi_master_rd.vhd"\
     "$rootdir/rtl/ad936x_txrx.vhd"\
     "$rootdir/rtl/ad936x_axi.vhd"\
+    "$rootdir/rtl/core.vhd"\
     "$rootdir/rtl/top.vhd"\
 ]
 

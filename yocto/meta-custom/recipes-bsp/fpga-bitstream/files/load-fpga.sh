@@ -13,6 +13,8 @@ case "$1" in
 
             echo "Loading AD9361 driver"
             modprobe ad9361
+            echo "Loading AD936x-AXI driver"
+            modprobe ad936x-axi
 
             # Cycle ENSM alert -> fdd to arm the LVDS data interface.
             # Normally ad9361_post_setup() in the AXI driver does this, but
@@ -30,6 +32,7 @@ case "$1" in
         fi
         ;;
     stop)
+        rmmod ad936x-axi
         rmmod ad9361
         ;;
     *)

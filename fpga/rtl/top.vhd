@@ -1,17 +1,22 @@
 --------------------------------------------------------------------------------
 -- Title       : FPGA Top
--- Project     :
+-- Project     : Zyndra
 -- Author      : Pekka Korpinen <pekka.korpinen@iki.fi>
 -- License     : MIT
 --------------------------------------------------------------------------------
 -- Description :
+--   Top-level wrapper: connects core (FPGA logic) to zynq_bd (PS7 block
+--   design). Handles AXI3/AXI4 adaptation, DDR/FIXED_IO passthrough,
+--   SPI passthrough, and AD9361 control GPIO routing.
 --
 -- History :
 --  2026-03-09 PKo
+--  2026-04-01 PKo  Split logic into core.vhd
 --------------------------------------------------------------------------------
 
 library ieee;
 use ieee.std_logic_1164.all;
+use work.ad936x_axi_pkg.all;
 
 entity top is
     port (
@@ -77,199 +82,73 @@ end entity top;
 
 architecture rtl of top is
 
-    signal s_gpio_i   : std_logic_vector(63 downto 0);
-    signal s_iq_i     : std_logic_vector(11 downto 0);
-    signal s_iq_q     : std_logic_vector(11 downto 0);
-    signal s_iq_valid : std_logic;
-    signal s_gpio_o   : std_logic_vector(63 downto 0);
-    signal s_gpio_t   : std_logic_vector(63 downto 0);
+    signal s_axil_mosi : t_axi4l_mosi;
+    signal s_axil_miso : t_axi4l_miso;
+    signal s_axi4_mosi : t_axi4_mosi;
+    signal s_axi4_miso : t_axi4_miso;
+
+    signal s_gpio_i : std_logic_vector(63 downto 0);
+    signal s_gpio_o : std_logic_vector(63 downto 0);
+    signal s_gpio_t : std_logic_vector(63 downto 0);
 
     signal s_spi_csn  : std_logic;
     signal s_spi_clk  : std_logic;
     signal s_spi_mosi : std_logic;
     signal s_spi_miso : std_logic;
 
-    signal s_iq_clk       : std_logic;
-    signal s_dbg_iq_frame : std_logic;
-
-    -- AXI Slave
-    signal s_axi_clk     : std_logic;
-    signal s_axi_rstn    : std_logic;
-    signal s_axi_araddr  : std_logic_vector(30 downto 0);
-    signal s_axi_arprot  : std_logic_vector(2 downto 0);
-    signal s_axi_arready : std_logic;
-    signal s_axi_arvalid : std_logic;
-    signal s_axi_awaddr  : std_logic_vector(30 downto 0);
-    signal s_axi_awprot  : std_logic_vector(2 downto 0);
-    signal s_axi_awready : std_logic;
-    signal s_axi_awvalid : std_logic;
-    signal s_axi_bready  : std_logic;
-    signal s_axi_bresp   : std_logic_vector(1 downto 0);
-    signal s_axi_bvalid  : std_logic;
-    signal s_axi_rdata   : std_logic_vector(31 downto 0);
-    signal s_axi_rready  : std_logic;
-    signal s_axi_rresp   : std_logic_vector(1 downto 0);
-    signal s_axi_rvalid  : std_logic;
-    signal s_axi_wdata   : std_logic_vector(31 downto 0);
-    signal s_axi_wready  : std_logic;
-    signal s_axi_wstrb   : std_logic_vector(3 downto 0);
-    signal s_axi_wvalid  : std_logic;
-
-    -- AXI Master
-    signal s_axim_awaddr  : std_logic_vector(31 downto 0);
-    signal s_axim_awlen   : std_logic_vector(7 downto 0);
-    signal s_axim_awsize  : std_logic_vector(2 downto 0);
-    signal s_axim_awburst : std_logic_vector(1 downto 0);
-    signal s_axim_awvalid : std_logic;
-    signal s_axim_awready : std_logic;
-
-    -- AXI4 write data channel (W)
-    signal s_axim_wdata  : std_logic_vector(63 downto 0);
-    signal s_axim_wstrb  : std_logic_vector(7 downto 0);
-    signal s_axim_wlast  : std_logic;
-    signal s_axim_wvalid : std_logic;
-    signal s_axim_wready : std_logic;
-
-    -- AXI4 write response channel (B)
-    signal s_axim_bvalid : std_logic;
-    signal s_axim_bready : std_logic;
-    signal s_axim_bresp  : std_logic_vector(1 downto 0);
-
-    -- AXI-Stream sink (upstream data)
-    signal s_axim_tdata  : std_logic_vector(31 downto 0);
-    signal s_axim_tvalid : std_logic;
-    signal s_axim_tready : std_logic;
+    signal s_axi_clk  : std_logic;
+    signal s_axi_rstn : std_logic;
 
 begin
 
-    -- Route IQ samples into EMIO GPIO_I so Linux can read via /dev/mem.
-    -- For EMIO, GPIO_I and GPIO_O are separate unidirectional PS7 ports.
-    -- DATA_RO (0xE000A068) always reads GPIO_I regardless of direction setting,
-    -- so all 64 bits are readable. We leave [3:0] as zero to avoid unexpected
-    -- readback on the RESETB/ENABLE/TXNRX/EN_AGC bits (cosmetic only).
-    -- EMIO[4:15]  = I[11:0]  (0xE000A068 bits[15:4])
-    -- EMIO[16:27] = Q[11:0]  (0xE000A068 bits[27:16])
-    s_gpio_i(3 downto 0)   <= (others => '0');
-    s_gpio_i(15 downto 4)  <= s_iq_i;
-    s_gpio_i(27 downto 16) <= s_iq_q;
-    s_gpio_i(63 downto 28) <= (others => '0');
-
-    gen_debug_spi : if false generate
-        -- Mirror SPI to the ext header
-        ext_1v8_io1_p <= s_spi_csn;
-        ext_1v8_io1_n <= s_spi_clk;
-        ext_1v8_io3_p <= s_spi_mosi;
-        ext_1v8_io3_n <= s_spi_miso;
-        ext_1v8_io5_p <= '0';
-        ext_1v8_io5_n <= '0';
-        ext_1v8_io7_p <= '0';
-        ext_1v8_io7_n <= '0';
-    end generate gen_debug_spi;
-
-    gen_debug_databus : if true generate
-        -- Mirror databus signals to the ext header
-        ext_1v8_io1_p <= s_iq_clk;
-        ext_1v8_io1_n <= s_iq_valid;
-        ext_1v8_io3_p <= s_iq_i(0);
-        ext_1v8_io3_n <= s_iq_q(0);
-        ext_1v8_io5_p <= '0';
-        ext_1v8_io5_n <= '0';
-        ext_1v8_io7_p <= '0';
-        ext_1v8_io7_n <= '0';
-    end generate gen_debug_databus;
-
-    -- AD9361 control
-    gpio_sync   <= '0'; -- ??
+    -- AD9361 control (from Zynq GPIO_O)
+    gpio_sync   <= '0';
     gpio_resetb <= s_gpio_o(0);
     enable      <= s_gpio_o(1);
     txnrx       <= s_gpio_o(2);
     gpio_en_agc <= s_gpio_o(3);
 
+    -- SPI passthrough
     spi_csn    <= s_spi_csn;
     spi_clk    <= s_spi_clk;
     spi_mosi   <= s_spi_mosi;
     s_spi_miso <= spi_miso;
 
-    -- AD9363 LVDS interface
-    ad936x_txrx_inst : entity work.ad936x_txrx
+    -- FPGA design core
+    core_inst : entity work.core
         port map (
-            rx_clk_p       => rx_clk_in_p,
-            rx_clk_n       => rx_clk_in_n,
-            rx_frame_p     => rx_frame_in_p,
-            rx_frame_n     => rx_frame_in_n,
-            rx_data_p      => rx_data_in_p,
-            rx_data_n      => rx_data_in_n,
-            tx_clk_p       => tx_clk_out_p,
-            tx_clk_n       => tx_clk_out_n,
-            tx_frame_p     => tx_frame_out_p,
-            tx_frame_n     => tx_frame_out_n,
-            tx_data_p      => tx_data_out_p,
-            tx_data_n      => tx_data_out_n,
-            o_iq_clk       => s_iq_clk,
-            o_iq_i         => s_iq_i,
-            o_iq_q         => s_iq_q,
-            o_iq_valid     => s_iq_valid,
-            o_dbg_iq_frame => s_dbg_iq_frame
+            i_axi_clk  => s_axi_clk,
+            i_axi_rstn => s_axi_rstn,
+            i_axil     => s_axil_mosi,
+            o_axil     => s_axil_miso,
+            o_axi4     => s_axi4_mosi,
+            i_axi4     => s_axi4_miso,
+            o_gpio_i   => s_gpio_i,
+            -- LVDS
+            rx_clk_in_p    => rx_clk_in_p,
+            rx_clk_in_n    => rx_clk_in_n,
+            rx_frame_in_p  => rx_frame_in_p,
+            rx_frame_in_n  => rx_frame_in_n,
+            rx_data_in_p   => rx_data_in_p,
+            rx_data_in_n   => rx_data_in_n,
+            tx_clk_out_p   => tx_clk_out_p,
+            tx_clk_out_n   => tx_clk_out_n,
+            tx_frame_out_p => tx_frame_out_p,
+            tx_frame_out_n => tx_frame_out_n,
+            tx_data_out_p  => tx_data_out_p,
+            tx_data_out_n  => tx_data_out_n,
+            -- Debug header
+            ext_1v8_io1_p => ext_1v8_io1_p,
+            ext_1v8_io1_n => ext_1v8_io1_n,
+            ext_1v8_io3_p => ext_1v8_io3_p,
+            ext_1v8_io3_n => ext_1v8_io3_n,
+            ext_1v8_io5_p => ext_1v8_io5_p,
+            ext_1v8_io5_n => ext_1v8_io5_n,
+            ext_1v8_io7_p => ext_1v8_io7_p,
+            ext_1v8_io7_n => ext_1v8_io7_n
         );
 
-    -- AD9363 AXI interface
-    ad936x_axi_inst : entity work.ad936x_axi
-        port map (
-            -- AXI4-Lite Bus
-            ACLK    => s_axi_clk,
-            ARESETn => s_axi_rstn,
-            -- Write
-            AWVALID => s_axi_awvalid,
-            AWADDR  => s_axi_awaddr,
-            AWPROT  => s_axi_awprot,
-            AWREADY => s_axi_awready,
-            WVALID  => s_axi_wvalid,
-            WDATA   => s_axi_wdata,
-            WREADY  => s_axi_wready,
-            BVALID  => s_axi_bvalid,
-            BREADY  => s_axi_bready,
-            BRESP   => s_axi_bresp,
-            -- Read
-            ARVALID => s_axi_arvalid,
-            ARREADY => s_axi_arready,
-            ARADDR  => s_axi_araddr,
-            ARPROT  => s_axi_arprot,
-            RVALID  => s_axi_rvalid,
-            RREADY  => s_axi_rready,
-            RDATA   => s_axi_rdata,
-            RRESP   => s_axi_rresp,
-            -- AXI Master
-            o_awaddr  => s_axim_awaddr,
-            o_awlen   => s_axim_awlen,
-            o_awsize  => s_axim_awsize,
-            o_awburst => s_axim_awburst,
-            o_awvalid => s_axim_awvalid,
-            i_awready => s_axim_awready,
-
-            -- AXI4 write data channel (W)
-            o_wdata  => s_axim_wdata,
-            o_wstrb  => s_axim_wstrb,
-            o_wlast  => s_axim_wlast,
-            o_wvalid => s_axim_wvalid,
-            i_wready => s_axim_wready,
-
-            -- AXI4 write response channel (B)
-            i_bvalid => s_axim_bvalid,
-            o_bready => s_axim_bready,
-            i_bresp  => s_axim_bresp,
-
-            -- AXI-Stream sink (upstream data)
-            i_tdata  => s_axim_tdata,
-            i_tvalid => s_axim_tvalid,
-            o_tready => s_axim_tready,
-            --
-            i_iq_clk   => s_iq_clk,
-            i_iq_valid => s_iq_valid,
-            i_iq_i     => s_iq_i,
-            i_iq_q     => s_iq_q
-        );
-
-    -- PS
+    -- Zynq PS7 block design
     zynq_bd_inst : entity work.zynq_bd
         port map (
             DDR_addr(14 downto 0)     => ddr_addr(14 downto 0),
@@ -293,71 +172,71 @@ begin
             FIXED_IO_ps_clk           => fixed_io_ps_clk,
             FIXED_IO_ps_porb          => fixed_io_ps_porb,
             FIXED_IO_ps_srstb         => fixed_io_ps_srstb,
-            -- AXI Slave
-            M00_AXI_0_araddr  => s_axi_araddr,
-            M00_AXI_0_arprot  => s_axi_arprot,
-            M00_AXI_0_arready => s_axi_arready,
-            M00_AXI_0_arvalid => s_axi_arvalid,
-            M00_AXI_0_awaddr  => s_axi_awaddr,
-            M00_AXI_0_awprot  => s_axi_awprot,
-            M00_AXI_0_awready => s_axi_awready,
-            M00_AXI_0_awvalid => s_axi_awvalid,
-            M00_AXI_0_bready  => s_axi_bready,
-            M00_AXI_0_bresp   => s_axi_bresp,
-            M00_AXI_0_bvalid  => s_axi_bvalid,
-            M00_AXI_0_rdata   => s_axi_rdata,
-            M00_AXI_0_rready  => s_axi_rready,
-            M00_AXI_0_rresp   => s_axi_rresp,
-            M00_AXI_0_rvalid  => s_axi_rvalid,
-            M00_AXI_0_wdata   => s_axi_wdata,
-            M00_AXI_0_wready  => s_axi_wready,
-            M00_AXI_0_wstrb   => s_axi_wstrb,
-            M00_AXI_0_wvalid  => s_axi_wvalid,
+            -- AXI-Lite (PS master → FPGA slave)
+            M00_AXI_0_araddr  => s_axil_mosi.araddr(30 downto 0),
+            M00_AXI_0_arprot  => s_axil_mosi.arprot,
+            M00_AXI_0_arready => s_axil_miso.arready,
+            M00_AXI_0_arvalid => s_axil_mosi.arvalid,
+            M00_AXI_0_awaddr  => s_axil_mosi.awaddr(30 downto 0),
+            M00_AXI_0_awprot  => s_axil_mosi.awprot,
+            M00_AXI_0_awready => s_axil_miso.awready,
+            M00_AXI_0_awvalid => s_axil_mosi.awvalid,
+            M00_AXI_0_bready  => s_axil_mosi.bready,
+            M00_AXI_0_bresp   => s_axil_miso.bresp,
+            M00_AXI_0_bvalid  => s_axil_miso.bvalid,
+            M00_AXI_0_rdata   => s_axil_miso.rdata,
+            M00_AXI_0_rready  => s_axil_mosi.rready,
+            M00_AXI_0_rresp   => s_axil_miso.rresp,
+            M00_AXI_0_rvalid  => s_axil_miso.rvalid,
+            M00_AXI_0_wdata   => s_axil_mosi.wdata,
+            M00_AXI_0_wready  => s_axil_miso.wready,
+            M00_AXI_0_wstrb   => s_axil_mosi.wstrb,
+            M00_AXI_0_wvalid  => s_axil_mosi.wvalid,
             AXI_CLK           => s_axi_clk,
             AXI_RSTN(0)       => s_axi_rstn,
-            -- AXI3 Master
-            S_AXI_HP0_0_araddr  => (others => '0'),
-            S_AXI_HP0_0_arburst => (others => '0'),
-            S_AXI_HP0_0_arcache => (others => '0'),
+            -- AXI3 HP slave (FPGA master → DDR)
+            S_AXI_HP0_0_araddr  => s_axi4_mosi.araddr,
+            S_AXI_HP0_0_arburst => s_axi4_mosi.arburst,
+            S_AXI_HP0_0_arcache => "0011",
             S_AXI_HP0_0_arid    => (others => '0'),
-            S_AXI_HP0_0_arlen   => (others => '0'),
+            S_AXI_HP0_0_arlen   => s_axi4_mosi.arlen(3 downto 0),
             S_AXI_HP0_0_arlock  => (others => '0'),
             S_AXI_HP0_0_arprot  => (others => '0'),
             S_AXI_HP0_0_arqos   => (others => '0'),
-            S_AXI_HP0_0_arready => open,
-            S_AXI_HP0_0_arsize  => (others => '0'),
-            S_AXI_HP0_0_arvalid => '0',
+            S_AXI_HP0_0_arready => s_axi4_miso.arready,
+            S_AXI_HP0_0_arsize  => s_axi4_mosi.arsize,
+            S_AXI_HP0_0_arvalid => s_axi4_mosi.arvalid,
 
-            S_AXI_HP0_0_awaddr  => s_axim_awaddr,
-            S_AXI_HP0_0_awburst => s_axim_awburst,
-            S_AXI_HP0_0_awcache => (others => '0'),
+            S_AXI_HP0_0_awaddr  => s_axi4_mosi.awaddr,
+            S_AXI_HP0_0_awburst => s_axi4_mosi.awburst,
+            S_AXI_HP0_0_awcache => "0011",
             S_AXI_HP0_0_awid    => (others => '0'),
-            S_AXI_HP0_0_awlen   => s_axim_awlen(3 downto 0),
+            S_AXI_HP0_0_awlen   => s_axi4_mosi.awlen(3 downto 0),
             S_AXI_HP0_0_awlock  => (others => '0'),
             S_AXI_HP0_0_awprot  => (others => '0'),
             S_AXI_HP0_0_awqos   => (others => '0'),
-            S_AXI_HP0_0_awready => s_axim_awready,
-            S_AXI_HP0_0_awsize  => s_axim_awsize,
-            S_AXI_HP0_0_awvalid => s_axim_awvalid,
+            S_AXI_HP0_0_awready => s_axi4_miso.awready,
+            S_AXI_HP0_0_awsize  => s_axi4_mosi.awsize,
+            S_AXI_HP0_0_awvalid => s_axi4_mosi.awvalid,
 
             S_AXI_HP0_0_bid    => open,
-            S_AXI_HP0_0_bready => s_axim_bready,
-            S_AXI_HP0_0_bresp  => s_axim_bresp,
-            S_AXI_HP0_0_bvalid => s_axim_bvalid,
+            S_AXI_HP0_0_bready => s_axi4_mosi.bready,
+            S_AXI_HP0_0_bresp  => s_axi4_miso.bresp,
+            S_AXI_HP0_0_bvalid => s_axi4_miso.bvalid,
 
-            S_AXI_HP0_0_rdata  => open,
+            S_AXI_HP0_0_rdata  => s_axi4_miso.rdata,
             S_AXI_HP0_0_rid    => open,
-            S_AXI_HP0_0_rlast  => open,
-            S_AXI_HP0_0_rready => '0',
-            S_AXI_HP0_0_rresp  => open,
-            S_AXI_HP0_0_rvalid => open,
+            S_AXI_HP0_0_rlast  => s_axi4_miso.rlast,
+            S_AXI_HP0_0_rready => s_axi4_mosi.rready,
+            S_AXI_HP0_0_rresp  => s_axi4_miso.rresp,
+            S_AXI_HP0_0_rvalid => s_axi4_miso.rvalid,
 
-            S_AXI_HP0_0_wdata  => s_axim_wdata,
+            S_AXI_HP0_0_wdata  => s_axi4_mosi.wdata,
             S_AXI_HP0_0_wid    => (others => '0'),
-            S_AXI_HP0_0_wlast  => s_axim_wlast,
-            S_AXI_HP0_0_wready => s_axim_wready,
-            S_AXI_HP0_0_wstrb  => s_axim_wstrb,
-            S_AXI_HP0_0_wvalid => s_axim_wvalid,
+            S_AXI_HP0_0_wlast  => s_axi4_mosi.wlast,
+            S_AXI_HP0_0_wready => s_axi4_miso.wready,
+            S_AXI_HP0_0_wstrb  => s_axi4_mosi.wstrb,
+            S_AXI_HP0_0_wvalid => s_axi4_mosi.wvalid,
             -- GPIO
             GPIO_I(63 downto 0) => s_gpio_i,
             GPIO_O(63 downto 0) => s_gpio_o,

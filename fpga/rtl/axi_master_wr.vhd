@@ -1,10 +1,12 @@
 --------------------------------------------------------------------------------
 -- Title       : AXI Master Writer
--- Project     :
+-- Project     : Zyndra
 -- Author      : Pekka Korpinen <pekka.korpinen@iki.fi>
 -- License     : MIT
 --------------------------------------------------------------------------------
 -- Description :
+--   AXI4 burst write master. Accepts AXI-Stream input, buffers in an internal
+--   FIFO, and writes to DDR via AXI4 bursts into a ringbuffer.
 --
 -- History :
 --  2026-03-09 PKo
@@ -61,11 +63,10 @@ end entity axi_master_wr;
 
 architecture rtl of axi_master_wr is
 
-    -- Shallow FIFO holds two bursts: we fill the next while sending the current.
-    -- Must be a power of 2 ≥ 16 (XPM constraint) — satisfied when g_burst_len ≥ 8.
-    constant c_fifo_depth : positive := 2 * g_burst_len;
+    -- Shallow FIFO for bursts
+    constant c_fifo_depth : positive := 4 * g_burst_len;
 
-    type t_state is (STANDBY, IDLE, AW_SEND, W_SEND, B_WAIT);
+    type t_state is (STANDBY, IDLE, AW_SEND, W_SEND, WAIT_OUTSTANDING);
 
     signal s_state    : t_state;
     signal s_beat_cnt : integer range 0 to g_burst_len - 1;
@@ -76,6 +77,7 @@ architecture rtl of axi_master_wr is
     -- Using latched values ensures a register write mid-run cannot corrupt the
     -- in-progress pointer arithmetic or wrap calculation.
     signal s_base_addr : unsigned(31 downto 0);
+    signal s_top_addr  : unsigned(31 downto 0);
     signal s_buf_size  : unsigned(31 downto 0);
 
     -- Active-high reset for XPM FIFO
@@ -83,6 +85,9 @@ architecture rtl of axi_master_wr is
 
     signal s_prev_tvalid : std_logic;
     signal s_prev_tdata  : std_logic_vector(31 downto 0);
+
+    -- Keep track of outstandings transactions
+    signal s_pending_cnt : unsigned(3 downto 0); -- HP has cap of 8
 
     -- Internal FIFO signals
     signal s_fifo_wr          : std_logic;
@@ -130,16 +135,15 @@ begin
     o_wlast  <= '1' when s_state = W_SEND and s_beat_cnt = g_burst_len - 1 else
                 '0';
 
-    -- Response channel: always ready once we are waiting for a response.
-    o_bready <= '1' when s_state = B_WAIT else
-                '0';
+    -- Response channel: always ready, we use this only to track on-going transactions
+    o_bready <= '1';
 
     -- Advance the FIFO by one word for each beat accepted by the slave.
     s_fifo_rd <= '1' when s_state = W_SEND and i_wready = '1' else
                  '0';
 
     -- -------------------------------------------------------------------------
-    -- State machine — registered state only
+    -- State machine
     -- -------------------------------------------------------------------------
     proc_sm : process (i_aclk) is
     begin
@@ -150,46 +154,55 @@ begin
 
                     if i_enable then
                         s_base_addr <= unsigned(i_base_addr);
+                        s_aw_addr   <= unsigned(i_base_addr);
+                        s_top_addr  <= unsigned(i_base_addr) + unsigned(i_buf_size);
                         s_buf_size  <= unsigned(i_buf_size);
-                        s_wr_ptr    <= (others => '0');
                         s_state     <= IDLE;
                     end if;
 
                 when IDLE =>
 
                     if not i_enable then
-                        s_state <= STANDBY;
+                        s_state <= WAIT_OUTSTANDING;
                     elsif s_fifo_prog_full then
-                        s_aw_addr <= s_base_addr + s_wr_ptr;  -- register now; valid in AW_SEND
-                        s_state   <= AW_SEND;
+                        s_state <= AW_SEND;
                     end if;
 
                 when AW_SEND =>
 
-                    -- Hold AWVALID until the interconnect accepts the address.
                     if i_awready then
                         s_beat_cnt <= 0;
                         s_state    <= W_SEND;
+                        -- Pre-calculate address for the next burst
+                        s_aw_addr <= s_aw_addr + g_burst_len * 8;
                     end if;
 
                 when W_SEND =>
 
                     if i_wready then
-                        s_wr_ptr <= s_wr_ptr + 8;
                         if s_beat_cnt = g_burst_len - 1 then
-                            s_state <= B_WAIT;
+                            -- Check for ringbuffer wrap, s_buf_size is always multiple of 8*g_burst_len
+                            if s_aw_addr >= s_top_addr then
+                                s_aw_addr <= s_base_addr;
+                            end if;
+
+                            if s_fifo_prog_full then
+                                -- Start a new transaction
+                                s_state <= AW_SEND;
+                            else
+                                -- Not enough data available, take a break
+                                s_state <= IDLE;
+                            end if;
                         else
                             s_beat_cnt <= s_beat_cnt + 1;
                         end if;
                     end if;
 
-                when B_WAIT =>
+                when WAIT_OUTSTANDING =>
 
-                    if i_bvalid then
-                        if s_wr_ptr >= s_buf_size then
-                            s_wr_ptr <= (others => '0');
-                        end if;
-                        s_state <= IDLE;
+                    -- Wait that all outstanding requests complete
+                    if s_pending_cnt = 0 then
+                        s_state <= STANDBY;
                     end if;
 
             end case;
@@ -197,10 +210,42 @@ begin
             if not i_aresetn then
                 s_state     <= STANDBY;
                 s_beat_cnt  <= 0;
-                s_wr_ptr    <= (others => '0');
                 s_aw_addr   <= (others => '0');
                 s_base_addr <= (others => '0');
                 s_buf_size  <= (others => '0');
+                s_top_addr  <= (others => '0');
+            end if;
+        end if;
+    end process;
+
+    -- Keep track of pending transactions
+    process (i_aclk) is
+        variable v_req  : std_logic;
+        variable v_rsp  : std_logic;
+        variable v_next : unsigned(s_wr_ptr'range);
+    begin
+        if rising_edge(i_aclk) then
+            v_req := o_awvalid and i_awready;
+            v_rsp := i_bvalid and o_bready;
+
+            if not i_aresetn then
+                s_pending_cnt <= (others => '0');
+            elsif v_req and not v_rsp then
+                s_pending_cnt <= s_pending_cnt + 1;
+            elsif not v_req and v_rsp then
+                s_pending_cnt <= s_pending_cnt - 1;
+            end if;
+
+            if s_state = STANDBY and i_enable = '1' then
+                s_wr_ptr <= (others => '0');
+            elsif v_rsp then
+                -- Burst completed, report back the write pointer
+                v_next := s_wr_ptr + g_burst_len * 8;
+                if v_next >= s_buf_size then
+                    s_wr_ptr <= (others => '0');
+                else
+                    s_wr_ptr <= v_next;
+                end if;
             end if;
         end if;
     end process;
@@ -233,7 +278,6 @@ begin
             CASCADE_HEIGHT      => 0,
             DOUT_RESET_VALUE    => "0",
             ECC_MODE            => "no_ecc",
-            EN_SIM_ASSERT_ERR   => "warning",
             FIFO_MEMORY_TYPE    => "distributed",
             FIFO_READ_LATENCY   => 0,
             FIFO_WRITE_DEPTH    => c_fifo_depth,

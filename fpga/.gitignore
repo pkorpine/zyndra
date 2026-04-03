@@ -3,3 +3,4 @@ vivado_project
 *.log
 *.str
 .Xil
+vunit_out
