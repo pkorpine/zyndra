@@ -101,8 +101,11 @@ ad9361_txrx --rx-udp 192.168.133.1:1234
 # Serve RX data out on TCP
 ad9361_txrx --rx-tcp 1234
 
-# Receive IQ data from TCP and transmit
-ad9361_txrx --tx-tcp 5000
+# Receive IQ data from TCP and transmit, TX buffer set to 10 Msamples
+ad9361_txrx --tx-tcp 1235 --tx-depth 10
+
+# Simultaneous RX + TX
+ad9361_txrx --rx-tcp 1234 --tx-tcp 1235
 ```
 
 ## Building instructions
@@ -268,7 +271,7 @@ cd host/ad936x-tool
 cargo run --release -- prbs-check
 ```
 
-### Loopback
+### Loopback PRBS
 
 Configure AD936x to loopback mode
 
@@ -286,6 +289,34 @@ echo 0x007 0x08 > /sys/kernel/debug/iio/iio:device1/direct_reg_access
 echo 0x3f5 0x01 > /sys/kernel/debug/iio/iio:device1/direct_reg_access
 
 ad9361_txrx --prbs
+```
+
+### Loopback with TX+RX
+
+1. Host transmits PRBS data to the target
+2. Target writes the data to AD936x
+3. AD936x loops the data back
+4. Target reads the data back from AD936x and transmits to host
+5. Host receives the data and verifies the PRBS
+
+Configure the target the same way as the loopback test above (sample rate,
+bus delays, BIST loopback bit), then run on the target:
+
+```sh
+# Enable both TX and RX
+ad9361_txrx --rx-tcp 1234 --tx-tcp 1235 --tx-depth 10.0
+```
+
+On the host (two terminals):
+
+```sh
+cd host/ad936x-tool
+
+# Terminal 1: stream PRBS into target TX
+cargo run --release -- prbs-gen -a 192.168.133.134:1235
+
+# Terminal 2: verify PRBS coming back from target RX
+cargo run --release -- prbs-check -a 192.168.133.134:1234
 ```
 
 ## License

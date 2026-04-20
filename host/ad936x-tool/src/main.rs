@@ -24,6 +24,8 @@ struct Args {
 enum Operation {
     /// Check RX PRBS
     PrbsCheck,
+    /// Generate PRBS, transmit to target TX
+    PrbsGen,
     /// CW generator
     Cw {
         /// Amplitude (0.0 - 1.0)
@@ -44,6 +46,10 @@ fn main() -> anyhow::Result<()> {
         Operation::PrbsCheck => {
             println!("AD936x PRBS checker");
             recv_prbs_check(stream)
+        }
+        Operation::PrbsGen => {
+            println!("PRBS generator");
+            send_prbs_gen(stream)
         }
         Operation::Cw {
             amplitude,
@@ -93,6 +99,48 @@ fn recv_prbs_check(mut stream: TcpStream) -> anyhow::Result<()> {
 
     let _ = receiver.join();
     let _ = verifier.join();
+    Ok(())
+}
+
+fn send_prbs_gen(mut stream: TcpStream) -> anyhow::Result<()> {
+    let (freebuf_wr, freebuf_rd) = mpsc::channel();
+    let (usedbuf_wr, usedbuf_rd) = mpsc::channel();
+
+    for _ in 0..16 {
+        freebuf_wr.send(vec![0u8; 65536]).unwrap();
+    }
+
+    let generator = std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut g = prbs::Generator::default();
+        loop {
+            let mut buf = freebuf_rd.recv()?;
+            g.fill(&mut buf);
+            usedbuf_wr.send(buf)?;
+        }
+    });
+
+    let transmitter = std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut t0 = Instant::now();
+        let mut samples = 0;
+        loop {
+            let buf = usedbuf_rd.recv()?;
+            stream.write_all(&buf)?;
+            samples += buf.len() / 4;
+            freebuf_wr.send(buf)?;
+
+            let t1 = Instant::now();
+            let td = t1.duration_since(t0);
+            if td >= Duration::from_secs(1) {
+                t0 = t1;
+                let msps = samples as f64 / td.as_secs_f64() / 1e6;
+                println!("msps={msps:.3}");
+                samples = 0;
+            }
+        }
+    });
+
+    let _ = generator.join();
+    let _ = transmitter.join();
     Ok(())
 }
 

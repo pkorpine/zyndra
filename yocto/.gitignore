@@ -6,3 +6,4 @@ build/tmp
 *.log
 .bash_history
 bitbake.lock
+build/conf/version.conf

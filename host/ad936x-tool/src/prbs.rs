@@ -1,3 +1,30 @@
+pub struct Generator {
+    state: u16,
+}
+
+impl Default for Generator {
+    fn default() -> Self {
+        // Initial state matches embedded prbs_init().
+        Self { state: 1 }
+    }
+}
+
+impl Generator {
+    /// Fill buf with PRBS samples. buf.len() must be a multiple of 4.
+    /// Layout per sample: [i_lo, i_hi, q_lo, q_hi] little-endian i16.
+    pub fn fill(&mut self, buf: &mut [u8]) {
+        for chunk in buf.chunks_exact_mut(4) {
+            let i_val = ((self.state >> 4) & 0xFFF) as i16;
+            let q_rev = bitrev12(self.state & 0xFFF) as i16;
+            let i = i_val << 4;
+            let q = q_rev << 4;
+            chunk[0..2].copy_from_slice(&i.to_le_bytes());
+            chunk[2..4].copy_from_slice(&q.to_le_bytes());
+            self.state = lfsr_next(self.state);
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Checker {
     pub errors: usize,
