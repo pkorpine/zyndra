@@ -11,6 +11,7 @@
 #define AD936X_AXI_IOC_GET_RX_BUFSIZE _IOR(AD936X_AXI_IOC_MAGIC, 0, uint32_t)
 #define AD936X_AXI_IOC_GET_BLOCKSIZE _IOR(AD936X_AXI_IOC_MAGIC, 1, uint32_t)
 #define AD936X_AXI_IOC_GET_TX_BUFSIZE _IOR(AD936X_AXI_IOC_MAGIC, 2, uint32_t)
+#define AD936X_AXI_IOC_ENABLE _IO(AD936X_AXI_IOC_MAGIC, 3)
 
 // Open device O_RDWR and populate ring sizes via ioctls.
 int driver_open(struct driver *drv) {
@@ -33,9 +34,10 @@ int driver_open(struct driver *drv) {
 }
 
 void driver_close(struct driver *drv) {
-    if (drv->fd >= 0)
-        close(drv->fd);
-    drv->fd = -1;
+    // Atomic swap so two threads calling this simultaneously only close once.
+    int fd = __atomic_exchange_n(&drv->fd, -1, __ATOMIC_SEQ_CST);
+    if (fd >= 0)
+        close(fd);
 }
 
 int driver_rx_get_block(struct driver *drv, struct rx_read *r) {
@@ -77,3 +79,11 @@ int16_t *driver_tx_mmap(struct driver *drv, uint32_t size) {
 }
 
 void driver_tx_munmap(int16_t *map, uint32_t size) { munmap(map, size); }
+
+int driver_enable(struct driver *drv) {
+    if (ioctl(drv->fd, AD936X_AXI_IOC_ENABLE) < 0) {
+        perror("ioctl enable");
+        return -1;
+    }
+    return 0;
+}

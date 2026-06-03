@@ -100,12 +100,11 @@ int udp_send_ring(int sock, struct sockaddr_in *dest, const uint8_t *data, uint3
     return 0;
 }
 
-int tcp_serve(int port, int sndbuf, int rcvbuf, int tcp_nodelay, const char *role,
-              tcp_session_fn session, void *user) {
+int tcp_listen(int port, const char *role) {
     int server = socket(AF_INET, SOCK_STREAM, 0);
     if (server < 0) {
         perror("socket");
-        return 1;
+        return -1;
     }
 
     int one = 1;
@@ -119,29 +118,29 @@ int tcp_serve(int port, int sndbuf, int rcvbuf, int tcp_nodelay, const char *rol
     if (bind(server, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("bind");
         close(server);
-        return 1;
+        return -1;
     }
     listen(server, 1);
+    fprintf(stderr, "%s: listening on port %d\n", role, port);
+    return server;
+}
 
-    while (1) {
-        fprintf(stderr, "Waiting for %s connection on port %d...\n", role, port);
-        int client = accept(server, NULL, NULL);
-        if (client < 0) {
-            perror("accept");
-            continue;
-        }
-        fprintf(stderr, "%s client connected\n", role);
-
-        if (sndbuf > 0)
-            setsockopt(client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
-        if (rcvbuf > 0)
-            setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-        if (tcp_nodelay)
-            setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-        session(client, user);
-
-        fprintf(stderr, "%s client disconnected\n", role);
-        close(client);
+int tcp_accept(int server, int sndbuf, int rcvbuf, int nodelay, const char *role) {
+    fprintf(stderr, "Waiting for %s connection...\n", role);
+    int client = accept(server, NULL, NULL);
+    if (client < 0) {
+        perror("accept");
+        return -1;
     }
+    fprintf(stderr, "%s client connected\n", role);
+
+    int one = 1;
+    if (sndbuf > 0)
+        setsockopt(client, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
+    if (rcvbuf > 0)
+        setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    if (nodelay)
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    return client;
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## [v0.2.1] - 2026-06-03
+
+### Yocto
+
+- `ad9361-txrx`: align tx and rx streams
+- `ad936x-axi`: new IOCTL command to allow atomic enable of tx and rx
+
+### Hos ttools
+
+- `ad936x-tool`: added latency test command
+
 ## [v0.2.0] - 2026-04-20
 
 Simultaneous TX+RX.

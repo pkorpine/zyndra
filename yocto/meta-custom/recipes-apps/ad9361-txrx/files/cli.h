@@ -1,6 +1,8 @@
 #ifndef AD9361_CLI_H
 #define AD9361_CLI_H
 
+#include <pthread.h>
+#include <stdbool.h>
 #include "driver.h"
 
 enum mode { MODE_NONE, MODE_TCP, MODE_UDP };
@@ -20,6 +22,11 @@ struct cli_cfg {
 struct app_ctx {
     struct driver drv;
     const struct cli_cfg *cli;
+    pthread_mutex_t start_mutex;
+    pthread_cond_t  start_cond;
+    bool            rx_session_active;
+    int             rx_server_fd;
+    int             tx_server_fd;
 };
 
 #endif

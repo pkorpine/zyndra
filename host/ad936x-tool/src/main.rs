@@ -6,6 +6,7 @@ use std::{
 };
 
 mod iq;
+mod latency;
 mod prbs;
 use clap::{Parser, Subcommand};
 
@@ -35,19 +36,42 @@ enum Operation {
         #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
         frequency: f64,
     },
+    /// Latency loopback test using LFM chirp (radar-style matched filter)
+    LatencyTest {
+        /// TX address (ip:port) — connect to ad9361-txrx --tx-tcp PORT
+        #[arg(long, default_value = "192.168.133.134:1235")]
+        tx_address: String,
+        /// RX address (ip:port) — connect to ad9361-txrx --rx-tcp PORT
+        #[arg(long, default_value = "192.168.133.134:1234")]
+        rx_address: String,
+        /// Chirp pulse length in samples
+        #[arg(long, default_value_t = 256)]
+        pulse_len: usize,
+        /// Pulse repetition interval in samples (must exceed expected delay)
+        #[arg(long, default_value_t = 8192)]
+        pri: usize,
+        /// Pulse amplitude (0.0 - 1.0)
+        #[arg(long, default_value_t = 0.9)]
+        amplitude: f64,
+        /// Number of independent measurements
+        #[arg(long, default_value_t = 20)]
+        n: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let stream = TcpStream::connect_timeout(&args.address.parse()?, Duration::from_secs(1))?;
-
     match args.mode {
         Operation::PrbsCheck => {
+            let stream =
+                TcpStream::connect_timeout(&args.address.parse()?, Duration::from_secs(1))?;
             println!("AD936x PRBS checker");
             recv_prbs_check(stream)
         }
         Operation::PrbsGen => {
+            let stream =
+                TcpStream::connect_timeout(&args.address.parse()?, Duration::from_secs(1))?;
             println!("PRBS generator");
             send_prbs_gen(stream)
         }
@@ -55,8 +79,21 @@ fn main() -> anyhow::Result<()> {
             amplitude,
             frequency,
         } => {
+            let stream =
+                TcpStream::connect_timeout(&args.address.parse()?, Duration::from_secs(1))?;
             println!("CW generator");
             send_cw(stream, amplitude, frequency)
+        }
+        Operation::LatencyTest {
+            tx_address,
+            rx_address,
+            pulse_len,
+            pri,
+            amplitude,
+            n,
+        } => {
+            println!("Latency loopback test");
+            run_latency_test(&tx_address, &rx_address, pulse_len, pri, amplitude, n)
         }
     }
 }
@@ -141,6 +178,112 @@ fn send_prbs_gen(mut stream: TcpStream) -> anyhow::Result<()> {
 
     let _ = generator.join();
     let _ = transmitter.join();
+    Ok(())
+}
+
+fn run_latency_test(
+    tx_addr: &str,
+    rx_addr: &str,
+    pulse_len: usize,
+    pri: usize,
+    amplitude: f64,
+    n_measurements: usize,
+) -> anyhow::Result<()> {
+    use latency::{Chirp, argmax, psr_db, xcorr_mag2};
+
+    println!(
+        "Chirp: {} samples, PRI: {} samples, time-bandwidth product: {}",
+        pulse_len, pri, pulse_len
+    );
+    println!("TX -> {tx_addr}  |  RX <- {rx_addr}");
+
+    let chirp = Chirp::new(pulse_len, pri);
+    let template_i = chirp.template_i.clone();
+    let template_q = chirp.template_q.clone();
+
+    let tx_stream = TcpStream::connect_timeout(&tx_addr.parse()?, Duration::from_secs(2))?;
+    let mut rx_stream = TcpStream::connect_timeout(&rx_addr.parse()?, Duration::from_secs(2))?;
+
+    // TX thread: stream chirp frames continuously
+    let frame = {
+        let mut f = vec![0u8; pri * 4];
+        chirp.fill_frame(&mut f, amplitude);
+        f
+    };
+
+    let block_samples = 8 * pri;
+    let mut delays = Vec::with_capacity(n_measurements);
+    let mut psrs = Vec::with_capacity(n_measurements);
+
+    // Receive queue
+    let (freebuf_wr, freebuf_rd) = mpsc::channel();
+    let (usedbuf_wr, usedbuf_rd) = mpsc::channel();
+
+    for _ in 0..16 {
+        freebuf_wr.send(vec![0u8; block_samples * 4]).unwrap();
+    }
+
+    let receiver = std::thread::spawn(move || -> anyhow::Result<()> {
+        loop {
+            let mut buf = freebuf_rd.recv()?;
+            rx_stream.read_exact(buf.as_mut_slice())?;
+            usedbuf_wr.send(buf)?;
+        }
+    });
+
+    let _tx = std::thread::spawn(move || -> anyhow::Result<()> {
+        let mut s = tx_stream;
+        loop {
+            s.write_all(&frame)?;
+        }
+    });
+
+    let verifier = std::thread::spawn(move || -> anyhow::Result<()> {
+        for i in 0..n_measurements {
+            let buf = usedbuf_rd.recv()?;
+
+            let scale = 1.0 / i16::MAX as f32;
+            let (rx_i, rx_q): (Vec<f32>, Vec<f32>) = buf
+                .chunks_exact(4)
+                .map(|b| {
+                    let iv = i16::from_le_bytes([b[0], b[1]]) as f32 * scale;
+                    let qv = i16::from_le_bytes([b[2], b[3]]) as f32 * scale;
+                    (iv, qv)
+                })
+                .unzip();
+            freebuf_wr.send(buf)?;
+
+            let corr = xcorr_mag2(&rx_i, &rx_q, &template_i, &template_q);
+            let peak = argmax(&corr);
+            // All peaks land at D + k·PRI; mod recovers D without TX/RX sync
+            let delay = peak % pri;
+            let psr = psr_db(&corr, peak, pulse_len * 2, pri);
+
+            println!(
+                "  #{:03}: delay = {:6} samples,  PSR = {:.1} dB",
+                i + 1,
+                delay,
+                psr
+            );
+
+            delays.push(delay as f64);
+            psrs.push(psr);
+        }
+
+        let n = delays.len() as f64;
+        let mean = delays.iter().sum::<f64>() / n;
+        let std = (delays.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / n).sqrt();
+        let mean_psr = psrs.iter().sum::<f32>() / n as f32;
+
+        println!("\nResults ({n_measurements} measurements):");
+        println!("  Delay : {mean:.1} ± {std:.1} samples");
+        println!("  PSR   : {mean_psr:.1} dB");
+        Ok(())
+    });
+
+    let _ = receiver.join();
+    let _ = verifier.join();
+
     Ok(())
 }
 

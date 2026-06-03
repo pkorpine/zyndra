@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #define SAMPLE_SIZE 4
+#define TXRX_PREFILL_SAMPLES (16384 * 128)
 
 struct rx_read {
     uint32_t rd;
@@ -28,6 +29,7 @@ static inline uint32_t ringbuf_used(uint32_t rd, uint32_t hw_wr, uint32_t size) 
 
 int driver_open(struct driver *drv);
 void driver_close(struct driver *drv);
+int driver_enable(struct driver *drv);
 
 int driver_rx_get_block(struct driver *drv, struct rx_read *r);
 int driver_tx_put_block(struct driver *drv, uint32_t wr);

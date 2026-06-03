@@ -1,5 +1,5 @@
 [package]
-name = "ad936x-tool"
+name = "ad936x-prbs-check"
 version = "0.1.0"
 edition = "2024"
 

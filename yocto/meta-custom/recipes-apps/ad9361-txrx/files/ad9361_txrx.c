@@ -6,9 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "cli.h"
 #include "diag.h"
+#include "net.h"
 #include "rx.h"
 #include "stats.h"
 #include "tx.h"
@@ -163,50 +165,85 @@ int main(int argc, char **argv) {
 
     struct app_ctx ctx = {0};
     ctx.cli = &cfg;
-    if (driver_open(&ctx.drv) < 0)
-        return 1;
+    ctx.drv.fd = -1;
+    ctx.rx_server_fd = -1;
+    ctx.tx_server_fd = -1;
+    pthread_mutex_init(&ctx.start_mutex, NULL);
+    pthread_cond_init(&ctx.start_cond, NULL);
 
-    int ret = 0;
-    switch (cfg.diagnostic) {
-    case DIAG_TEST:
-        ret = diag_test(&ctx);
-        goto done;
-    case DIAG_LOOPBACK:
-        ret = diag_loopback(&ctx);
-        goto done;
-    case DIAG_PRBS:
-        ret = diag_prbs(&ctx);
-        goto done;
-    case DIAG_MEMBENCH:
-        ret = diag_membench(&ctx, cfg.membench_loops);
-        goto done;
-    case DIAG_NONE:
-        break;
+    // Diagnostics: open driver once, run, close, exit.
+    if (cfg.diagnostic != DIAG_NONE) {
+        if (driver_open(&ctx.drv) < 0)
+            return 1;
+        int ret = 0;
+        switch (cfg.diagnostic) {
+        case DIAG_TEST:
+            ret = diag_test(&ctx);
+            break;
+        case DIAG_LOOPBACK:
+            ret = diag_loopback(&ctx);
+            break;
+        case DIAG_PRBS:
+            ret = diag_prbs(&ctx);
+            break;
+        case DIAG_MEMBENCH:
+            ret = diag_membench(&ctx, cfg.membench_loops);
+            break;
+        default:
+            break;
+        }
+        driver_close(&ctx.drv);
+        return ret;
     }
 
+    // Streaming: stats thread runs for the lifetime of the process.
     pthread_t stats_thr;
     pthread_create(&stats_thr, NULL, status_thread, NULL);
     pin_thread(stats_thr, 0);
 
-    if (cfg.rx_mode != MODE_NONE && cfg.tx_mode != MODE_NONE) {
-        pthread_t rt, tt;
-        pthread_create(&rt, NULL, rx_thread, &ctx);
-        pthread_create(&tt, NULL, tx_thread, &ctx);
-        pin_thread(rt, 1);
-        pin_thread(tt, 0);
-        void *rret = NULL, *tret = NULL;
-        pthread_join(rt, &rret);
-        pthread_join(tt, &tret);
-        ret = (int)(intptr_t)rret | (int)(intptr_t)tret;
-    } else if (cfg.rx_mode != MODE_NONE) {
-        pin_thread(pthread_self(), 1);
-        ret = (int)(intptr_t)rx_thread(&ctx);
-    } else if (cfg.tx_mode != MODE_NONE) {
-        pin_thread(pthread_self(), 1);
-        ret = (int)(intptr_t)tx_thread(&ctx);
+    // TCP server sockets are created once and survive across reconnections.
+    if (cfg.rx_mode == MODE_TCP) {
+        ctx.rx_server_fd = tcp_listen(cfg.rx_port, "RX");
+        if (ctx.rx_server_fd < 0)
+            return 1;
+    }
+    if (cfg.tx_mode == MODE_TCP) {
+        ctx.tx_server_fd = tcp_listen(cfg.tx_port, "TX");
+        if (ctx.tx_server_fd < 0)
+            return 1;
     }
 
-done:
-    driver_close(&ctx.drv);
-    return ret;
+    // Reconnect loop: open the driver fresh for each session so the FPGA is
+    // properly reset between connections.
+    for (;;) {
+        ctx.rx_session_active = false;
+
+        if (driver_open(&ctx.drv) < 0)
+            break;
+
+        if (cfg.rx_mode != MODE_NONE && cfg.tx_mode != MODE_NONE) {
+            pthread_t rt, tt;
+            pthread_create(&rt, NULL, rx_thread, &ctx);
+            pthread_create(&tt, NULL, tx_thread, &ctx);
+            pin_thread(rt, 1);
+            pin_thread(tt, 0);
+            pthread_join(rt, NULL);
+            pthread_join(tt, NULL);
+        } else if (cfg.rx_mode != MODE_NONE) {
+            pin_thread(pthread_self(), 1);
+            rx_thread(&ctx);
+        } else if (cfg.tx_mode != MODE_NONE) {
+            pin_thread(pthread_self(), 1);
+            tx_thread(&ctx);
+        }
+
+        // No-op if a task already closed the driver (combined mode cross-signal).
+        driver_close(&ctx.drv);
+    }
+
+    if (ctx.rx_server_fd >= 0)
+        close(ctx.rx_server_fd);
+    if (ctx.tx_server_fd >= 0)
+        close(ctx.tx_server_fd);
+    return 0;
 }

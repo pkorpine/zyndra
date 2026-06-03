@@ -53,6 +53,7 @@ struct ad936x_axi_regs {
 #define AD936X_AXI_IOC_GET_RX_BUFSIZE _IOR(AD936X_AXI_IOC_MAGIC, 0, __u32)
 #define AD936X_AXI_IOC_GET_BLOCKSIZE _IOR(AD936X_AXI_IOC_MAGIC, 1, __u32)
 #define AD936X_AXI_IOC_GET_TX_BUFSIZE _IOR(AD936X_AXI_IOC_MAGIC, 2, __u32)
+#define AD936X_AXI_IOC_ENABLE _IO(AD936X_AXI_IOC_MAGIC, 3)
 
 static unsigned int rx_block_size = 65536;
 module_param(rx_block_size, uint, 0444);
@@ -144,12 +145,19 @@ static int ad936x_axi_open(struct inode *inode, struct file *f) {
     writel(0, &priv->regs->tx_buf_wr);
     priv->tx_wr_ptr = 0;
 
-    /* Release reset, enable is performed in mmap() */
+    /* Release reset, enable is performed via IOCTL_ENABLE */
     writel(0, &priv->regs->ctrl);
+
+    /* Clear sizes so the timer guard (rxbuf_size > 0) holds until mmap re-establishes them */
+    priv->rxbuf_size = 0;
+    priv->txbuf_size = 0;
+
+    /* Read actual hw pointer — FPGA may not zero rx_buf_wr on soft reset */
+    u32 hw_wr = readl(&priv->regs->rx_buf_wr);
 
     priv->closing = false;
     priv->rd_ptr = 0;
-    priv->timer_wr_ptr = 0;
+    priv->timer_wr_ptr = hw_wr;
     atomic_set(&priv->blocks_ready, 0);
     init_waitqueue_head(&priv->tx_wq);
     init_waitqueue_head(&priv->rx_wq);
@@ -160,7 +168,7 @@ static int ad936x_axi_open(struct inode *inode, struct file *f) {
     priv->open_time = ktime_get();
     priv->last_read_time = priv->open_time;
     priv->total_bytes_written = 0;
-    priv->prev_wr_ptr = 0;
+    priv->prev_wr_ptr = hw_wr;
     priv->buf_used_peak = 0;
     priv->read_count = 0;
     priv->overrun_bytes = 0;
@@ -294,8 +302,6 @@ static ssize_t ad936x_axi_write(struct file *f, const char __user *buf, size_t c
 static int ad936x_axi_mmap(struct file *f, struct vm_area_struct *vma) {
     struct ad936x_axi *priv = file_to_priv(f);
     unsigned long size = vma->vm_end - vma->vm_start;
-    u32 ctrl = readl(&priv->regs->ctrl);
-
     phys_addr_t phys;
 
     if (size % rx_block_size != 0)
@@ -310,7 +316,6 @@ static int ad936x_axi_mmap(struct file *f, struct vm_area_struct *vma) {
         priv->rxbuf_size = size;
         phys = priv->rxbuf_phys;
         writel(priv->rxbuf_size, &priv->regs->rx_buf_size);
-        ctrl |= AD936X_CTRL_RX_ENABLE;
     } else if (vma->vm_pgoff == 1) {
         /* TX buffer - read-write */
         if (size > priv->txbuf_size_max)
@@ -318,14 +323,11 @@ static int ad936x_axi_mmap(struct file *f, struct vm_area_struct *vma) {
         priv->txbuf_size = size;
         phys = priv->txbuf_phys;
         writel(priv->txbuf_size, &priv->regs->tx_buf_size);
-        ctrl |= AD936X_CTRL_TX_ENABLE;
     } else {
         return -EINVAL;
     }
 
     vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP | VM_PFNMAP);
-
-    writel(ctrl, &priv->regs->ctrl);
 
     /* Cached mapping — this is the whole point of this driver */
     return remap_pfn_range(vma, vma->vm_start, phys >> PAGE_SHIFT, size, vma->vm_page_prot);
@@ -341,6 +343,22 @@ static long ad936x_axi_ioctl(struct file *f, unsigned int cmd, unsigned long arg
         return put_user((__u32)rx_block_size, (__u32 __user *)arg);
     case AD936X_AXI_IOC_GET_TX_BUFSIZE:
         return put_user((__u32)priv->txbuf_size_max, (__u32 __user *)arg);
+    case AD936X_AXI_IOC_ENABLE: {
+        u32 ctrl = 0;
+        if (priv->rxbuf_size > 0)
+            ctrl |= AD936X_CTRL_RX_ENABLE;
+        if (priv->txbuf_size > 0)
+            ctrl |= AD936X_CTRL_TX_ENABLE;
+        /* ctrl is 0 coming from open(); write it explicitly to make the 0→1
+         * edge visible in the source and to guard against future callers.
+         * The FPGA resets rx_buf_wr to 0 on this edge. */
+        writel(0, &priv->regs->ctrl);
+        priv->rd_ptr = 0;
+        priv->timer_wr_ptr = 0;
+        atomic_set(&priv->blocks_ready, 0);
+        writel(ctrl, &priv->regs->ctrl);
+        return 0;
+    }
     default:
         return -ENOTTY;
     }
@@ -379,10 +397,6 @@ static int ad936x_axi_stats_show(struct seq_file *s, void *unused) {
         s64 uptime_us = ktime_us_delta(now, priv->open_time);
         u64 total = priv->total_bytes_written;
         u64 samples = total >> 2;
-        u32 drops = readl(&priv->regs->rx_overflow);
-        u32 wr = readl(&priv->regs->rx_buf_wr);
-        u32 rd = priv->rd_ptr;
-        u32 used = (wr >= rd) ? (wr - rd) : (priv->rxbuf_size - rd + wr);
         s64 age_us = ktime_us_delta(now, priv->last_read_time);
         s32 rem;
         u32 urem;
@@ -406,11 +420,14 @@ static int ad936x_axi_stats_show(struct seq_file *s, void *unused) {
 
         /* RX */
         if (priv->rxbuf_size > 0) {
-            seq_printf(s, "rx_overflow:      %u\n", drops);
+            u32 drops = readl(&priv->regs->rx_overflow);
+            u32 wr = readl(&priv->regs->rx_buf_wr);
+            u32 rd = priv->rd_ptr;
+            u32 used = (wr >= rd) ? (wr - rd) : (priv->rxbuf_size - rd + wr);
+
+            seq_printf(s, "rx (wr rd of):    0x%08x 0x%08x %u\n", wr, rd, drops);
             seq_printf(s, "overrun_bytes:    %llu\n", priv->overrun_bytes);
             seq_printf(s, "rx_buf_size:      %zu\n", priv->rxbuf_size);
-            seq_printf(s, "rx_wr_ptr:        0x%08x\n", wr);
-            seq_printf(s, "rx_rd_ptr:        0x%08x\n", rd);
             seq_printf(s, "rx_buf_used:      %u (%u%%)\n", used,
                        (unsigned int)(used / (priv->rxbuf_size / 100)));
             seq_printf(s, "rx_buf_used_peak: %u (%u%%)\n", priv->buf_used_peak,
@@ -425,17 +442,15 @@ static int ad936x_axi_stats_show(struct seq_file *s, void *unused) {
 
         /* TX */
         if (priv->txbuf_size > 0) {
-            u32 tx_wr = priv->tx_wr_ptr;
-            u32 tx_rd = readl(&priv->regs->tx_buf_rd);
-            u32 tx_underruns = readl(&priv->regs->tx_underrun);
-            u32 tx_used = (tx_wr >= tx_rd) ? (tx_wr - tx_rd) : (priv->txbuf_size - tx_rd + tx_wr);
+            u32 wr = priv->tx_wr_ptr;
+            u32 rd = readl(&priv->regs->tx_buf_rd);
+            u32 underruns = readl(&priv->regs->tx_underrun);
+            u32 used = (wr >= rd) ? (wr - rd) : (priv->txbuf_size - rd + wr);
 
-            seq_printf(s, "tx_underrun:      %u\n", tx_underruns);
+            seq_printf(s, "tx (wr rd ur):    0x%08x 0x%08x %u\n", wr, rd, underruns);
             seq_printf(s, "tx_buf_size:      %zu\n", priv->txbuf_size);
-            seq_printf(s, "tx_wr_ptr:        0x%08x\n", tx_wr);
-            seq_printf(s, "tx_rd_ptr:        0x%08x\n", tx_rd);
-            seq_printf(s, "tx_buf_used:      %u (%u%%)\n", tx_used,
-                       priv->txbuf_size ? (unsigned int)(tx_used / (priv->txbuf_size / 100)) : 0);
+            seq_printf(s, "tx_buf_used:      %u (%u%%)\n", used,
+                       priv->txbuf_size ? (unsigned int)(used / (priv->txbuf_size / 100)) : 0);
         }
     }
 
